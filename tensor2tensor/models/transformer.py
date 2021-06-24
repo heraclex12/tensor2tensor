@@ -210,131 +210,6 @@ def transformer_decode(decoder_function,
     # Expand since t2t expects 4d tensors.
     return tf.expand_dims(decoder_output, axis=2)
 
-@registry.register_model
-class BERT2RND(t2t_model.T2TModel):
-  """Attention net.  See file docstring."""
-
-  def __init__(self, *args, **kwargs):
-    super(BERT2RND, self).__init__(*args, **kwargs)
-    self.attention_weights = {}  # For visualizing attention heads.
-    self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
-    self._encoder_function = TFBertModel.from_pretrained('bert-base-cased', output_hidden_states=True)
-    self._decoder_function = transformer_decoder
-    self._init_cache_fn = _init_transformer_cache
-    self._prepare_encoder_fn = transformer_prepare_encoder
-    self._prepare_decoder_fn = transformer_prepare_decoder
-
-  def encode(self, inputs, attention_mask):
-    """Encode transformer inputs, see bert_encode."""
-    return bert_encode(
-        self._encoder_function, inputs, attention_mask)
-
-  def decode(self,
-             decoder_input,
-             encoder_output,
-             encoder_decoder_attention_bias,
-             decoder_self_attention_bias,
-             hparams,
-             cache=None,
-             decode_loop_step=None,
-             nonpadding=None,
-             losses=None,
-             **kwargs):
-    """Decode Transformer outputs, see transformer_decode."""
-    return transformer_decode(
-        self._decoder_function, decoder_input, encoder_output,
-        encoder_decoder_attention_bias, decoder_self_attention_bias,
-        hparams, attention_weights=self.attention_weights, cache=cache,
-        decode_loop_step=decode_loop_step, nonpadding=nonpadding, losses=losses,
-        **kwargs)
-
-  def body(self, features):
-    """Transformer main model_fn.
-
-    Args:
-      features: Map of features to the model. Should contain the following:
-          "inputs": Transformer inputs. [batch_size, input_length, 1,
-            hidden_dim].
-          "targets": Target decoder outputs. [batch_size, decoder_length, 1,
-            hidden_dim]
-
-    Returns:
-      Final decoder representation. [batch_size, decoder_length, hidden_dim]
-    """
-    hparams = self._hparams
-
-    losses = []
-
-    if self.has_input:
-      inputs, attention_mask = self._prepare_inputs_for_bert_body(features)
-      encoder_output, encoder_decoder_attention_bias = self.encode(
-          inputs, attention_mask)
-    else:
-      encoder_output, encoder_decoder_attention_bias = (None, None)
-
-    targets = features["targets"]
-    targets_shape = common_layers.shape_list(targets)
-    targets = common_layers.flatten4d3d(targets)
-    decoder_input, decoder_self_attention_bias = self._prepare_decoder_fn(
-        targets, hparams, features=features)
-
-    # Not all subclasses of Transformer support keyword arguments related to
-    # recurrent memory, so only pass these arguments if memory is enabled.
-    decode_kwargs = {}
-    if self.recurrent_memory_by_layer is not None:
-      # TODO(kitaev): The chunk_number feature currently has the same shape as
-      # "targets", but this is only for the purposes of sharing sharding code.
-      # In fact every token within an example must have the same chunk number.
-      chunk_number_each_token = tf.squeeze(features["chunk_number"], (-1, -2))
-      chunk_number_each_example = chunk_number_each_token[:, 0]
-      # Uncomment the code below to verify that tokens within a batch share the
-      # same chunk number:
-      # with tf.control_dependencies([
-      #     tf.assert_equal(chunk_number_each_token,
-      #                     chunk_number_each_example[:, None])
-      # ]):
-      #   chunk_number_each_example = tf.identity(chunk_number_each_example)
-      decode_kwargs = dict(
-          recurrent_memory_by_layer=self.recurrent_memory_by_layer,
-          chunk_number=chunk_number_each_example,
-          )
-    decoder_output = self.decode(
-        decoder_input,
-        encoder_output,
-        encoder_decoder_attention_bias,
-        decoder_self_attention_bias,
-        hparams,
-        nonpadding=features_to_nonpadding(features, "targets"),
-        losses=losses,
-        **decode_kwargs
-        )
-    expected_attentions = features.get("expected_attentions")
-    if expected_attentions is not None:
-      attention_loss = common_attention.encoder_decoder_attention_loss(
-          expected_attentions, self.attention_weights,
-          hparams.expected_attention_loss_type,
-          hparams.expected_attention_loss_multiplier)
-      return decoder_output, {"attention_loss": attention_loss}
-
-    ret = tf.reshape(decoder_output, targets_shape)
-    if losses:
-      return ret, {"extra_loss": tf.add_n(losses)}
-    else:
-      return ret
-
-  def _prepare_inputs_for_bert_body(self, features):
-    """Prepare inputs for body.
-
-    Args:
-      features: Map of string to model features. Should contain
-          "inputs": Transformer inputs. [batch_size, input_length, 1,
-            hidden_dim].
-
-    Returns:
-      Inputs which will be passed to the model. [batch_size, input_length, 1,
-          1]
-    """
-    return features["inputs_raw"], features["attention_mask"]
 
 
 @registry.register_model
@@ -1093,6 +968,114 @@ class Transformer(t2t_model.T2TModel):
       else:
         ret["outputs"] = ret["outputs"][:, :, partial_targets_length:]
     return ret
+
+@registry.register_model
+class BERT2RND(Transformer):
+  """Attention net.  See file docstring."""
+
+  def __init__(self, *args, **kwargs):
+    super(BERT2RND, self).__init__(*args, **kwargs)
+    self.attention_weights = {}  # For visualizing attention heads.
+    self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
+    self._encoder_function = TFBertModel.from_pretrained('bert-base-cased', output_hidden_states=True)
+    self._decoder_function = transformer_decoder
+    self._init_cache_fn = _init_transformer_cache
+    self._prepare_encoder_fn = transformer_prepare_encoder
+    self._prepare_decoder_fn = transformer_prepare_decoder
+
+  def encode(self, inputs, attention_mask):
+    """Encode transformer inputs, see bert_encode."""
+    return bert_encode(
+        self._encoder_function, inputs, attention_mask)
+
+  def body(self, features):
+    """Transformer main model_fn.
+
+    Args:
+      features: Map of features to the model. Should contain the following:
+          "inputs": Transformer inputs. [batch_size, input_length, 1,
+            hidden_dim].
+          "targets": Target decoder outputs. [batch_size, decoder_length, 1,
+            hidden_dim]
+
+    Returns:
+      Final decoder representation. [batch_size, decoder_length, hidden_dim]
+    """
+    hparams = self._hparams
+
+    losses = []
+
+    if self.has_input:
+      inputs, attention_mask = self._prepare_inputs_for_bert_body(features)
+      encoder_output, encoder_decoder_attention_bias = self.encode(
+          inputs, attention_mask)
+    else:
+      encoder_output, encoder_decoder_attention_bias = (None, None)
+
+    targets = features["targets"]
+    targets_shape = common_layers.shape_list(targets)
+    targets = common_layers.flatten4d3d(targets)
+    decoder_input, decoder_self_attention_bias = self._prepare_decoder_fn(
+        targets, hparams, features=features)
+
+    # Not all subclasses of Transformer support keyword arguments related to
+    # recurrent memory, so only pass these arguments if memory is enabled.
+    decode_kwargs = {}
+    if self.recurrent_memory_by_layer is not None:
+      # TODO(kitaev): The chunk_number feature currently has the same shape as
+      # "targets", but this is only for the purposes of sharing sharding code.
+      # In fact every token within an example must have the same chunk number.
+      chunk_number_each_token = tf.squeeze(features["chunk_number"], (-1, -2))
+      chunk_number_each_example = chunk_number_each_token[:, 0]
+      # Uncomment the code below to verify that tokens within a batch share the
+      # same chunk number:
+      # with tf.control_dependencies([
+      #     tf.assert_equal(chunk_number_each_token,
+      #                     chunk_number_each_example[:, None])
+      # ]):
+      #   chunk_number_each_example = tf.identity(chunk_number_each_example)
+      decode_kwargs = dict(
+          recurrent_memory_by_layer=self.recurrent_memory_by_layer,
+          chunk_number=chunk_number_each_example,
+          )
+    decoder_output = self.decode(
+        decoder_input,
+        encoder_output,
+        encoder_decoder_attention_bias,
+        decoder_self_attention_bias,
+        hparams,
+        nonpadding=features_to_nonpadding(features, "targets"),
+        losses=losses,
+        **decode_kwargs
+        )
+    expected_attentions = features.get("expected_attentions")
+    if expected_attentions is not None:
+      attention_loss = common_attention.encoder_decoder_attention_loss(
+          expected_attentions, self.attention_weights,
+          hparams.expected_attention_loss_type,
+          hparams.expected_attention_loss_multiplier)
+      return decoder_output, {"attention_loss": attention_loss}
+
+    ret = tf.reshape(decoder_output, targets_shape)
+    if losses:
+      return ret, {"extra_loss": tf.add_n(losses)}
+    else:
+      return ret
+
+  def _prepare_inputs_for_bert_body(self, features):
+    """Prepare inputs for body.
+
+    Args:
+      features: Map of string to model features. Should contain
+          "inputs": Transformer inputs. [batch_size, input_length, 1,
+            hidden_dim].
+
+    Returns:
+      Inputs which will be passed to the model. [batch_size, input_length, 1,
+          1]
+    """
+    return features["inputs_raw"], features["attention_mask"]
+
 
 
 def _init_transformer_cache(cache, hparams, batch_size, attention_init_length,
