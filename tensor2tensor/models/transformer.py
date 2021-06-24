@@ -133,10 +133,10 @@ def bert_encode(encoder_function, inputs, attention_mask=None, **kwargs):
   """
 
   encoder_decoder_attention_bias = common_attention.attention_bias_ignore_padding(
-          attention_mask)
-  
+          tf.to_float(attention_mask))
+
   encoder_outputs = encoder_function(
-      inputs=encoder_input,
+      inputs,
       attention_mask=attention_mask,
   )
   encoder_output = encoder_outputs[0]
@@ -321,6 +321,20 @@ class BERT2RND(t2t_model.T2TModel):
       return ret, {"extra_loss": tf.add_n(losses)}
     else:
       return ret
+
+  def _prepare_inputs_for_bert_body(self, features):
+    """Prepare inputs for body.
+
+    Args:
+      features: Map of string to model features. Should contain
+          "inputs": Transformer inputs. [batch_size, input_length, 1,
+            hidden_dim].
+
+    Returns:
+      Inputs which will be passed to the model. [batch_size, input_length, 1,
+          1]
+    """
+    return features["inputs_raw"], features["attention_mask"]
 
 
 @registry.register_model
