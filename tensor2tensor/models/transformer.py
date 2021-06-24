@@ -115,6 +115,35 @@ def transformer_encode(encoder_function, inputs, target_space, hparams,
   return encoder_output, encoder_decoder_attention_bias
 
 
+def bert_encode(encoder_function, inputs, attention_mask=None, **kwargs):
+  """Encode transformer inputs.
+
+  Args:
+    encoder_function: the encoder function
+    inputs: Transformer inputs [batch_size, input_length, 1, hidden_dim] which
+      will be flattened along the two spatial dimensions.
+    attention_mask: mask to store attention to.
+
+  Returns:
+    Tuple of:
+        encoder_output: Encoder representation.
+            [batch_size, input_length, hidden_dim]
+        encoder_decoder_attention_bias: Bias and mask weights for
+            encoder-decoder attention. [batch_size, input_length]
+  """
+
+  encoder_decoder_attention_bias = common_attention.attention_bias_ignore_padding(
+          attention_mask)
+  
+  encoder_outputs = encoder_function(
+      inputs=encoder_input,
+      attention_mask=attention_mask,
+  )
+  encoder_output = encoder_outputs[0]
+
+  return encoder_output, encoder_decoder_attention_bias
+
+
 def transformer_decode(decoder_function,
                        decoder_input,
                        encoder_output,
@@ -195,13 +224,10 @@ class BERT2RND(t2t_model.T2TModel):
     self._prepare_encoder_fn = transformer_prepare_encoder
     self._prepare_decoder_fn = transformer_prepare_decoder
 
-  def encode(self, inputs, target_space, hparams, features=None, losses=None):
-    """Encode transformer inputs, see transformer_encode."""
-    return transformer_encode(
-        self._encoder_function, inputs, target_space, hparams,
-        attention_weights=self.attention_weights,
-        features=features, losses=losses,
-        prepare_encoder_fn=self._prepare_encoder_fn)
+  def encode(self, inputs, attention_mask):
+    """Encode transformer inputs, see bert_encode."""
+    return bert_encode(
+        self._encoder_function, inputs, attention_mask)
 
   def decode(self,
              decoder_input,
@@ -231,7 +257,6 @@ class BERT2RND(t2t_model.T2TModel):
             hidden_dim].
           "targets": Target decoder outputs. [batch_size, decoder_length, 1,
             hidden_dim]
-          "target_space_id": A scalar int from data_generators.problem.SpaceID.
 
     Returns:
       Final decoder representation. [batch_size, decoder_length, hidden_dim]
@@ -241,10 +266,9 @@ class BERT2RND(t2t_model.T2TModel):
     losses = []
 
     if self.has_input:
-      inputs = self._prepare_inputs_for_body(features)
-      target_space = features["target_space_id"]
+      inputs, attention_mask = self._prepare_inputs_for_bert_body(features)
       encoder_output, encoder_decoder_attention_bias = self.encode(
-          inputs, target_space, hparams, features=features, losses=losses)
+          inputs, attention_mask)
     else:
       encoder_output, encoder_decoder_attention_bias = (None, None)
 
@@ -429,7 +453,7 @@ class Transformer(t2t_model.T2TModel):
     """
     return features["inputs"]
 
-  def _prepare_inputs_raw_for_body(self, features):
+  def _prepare_inputs_for_bert_body(self, features):
     """Prepare inputs for body.
 
     Args:
@@ -441,7 +465,7 @@ class Transformer(t2t_model.T2TModel):
       Inputs which will be passed to the model. [batch_size, input_length, 1,
           1]
     """
-    return features["inputs_raw"]
+    return features["inputs_raw"], features["attention_mask"]
 
   def _greedy_infer(self, features, decode_length, use_tpu=False):
     """Fast version of greedy decoding.
