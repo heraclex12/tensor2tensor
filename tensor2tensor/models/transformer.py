@@ -132,15 +132,14 @@ def bert_encode(encoder_function, inputs, attention_mask=None, **kwargs):
             encoder-decoder attention. [batch_size, input_length]
   """
 
-  encoder_decoder_attention_bias = common_attention.attention_bias_ignore_padding(
-          tf.to_float(attention_mask))
+  encoder_decoder_attention_bias = common_attention.attention_bias_ignore_padding(attention_mask)
 
   encoder_outputs = encoder_function(
       inputs,
       attention_mask=attention_mask,
   )
   encoder_output = encoder_outputs[0]
-
+  print(encoder_output.shape)
   return encoder_output, encoder_decoder_attention_bias
 
 
@@ -1068,15 +1067,14 @@ class Bert2Rnd(Transformer):
     Args:
       features: Map of string to model features. Should contain
           "inputs": Transformer inputs. [batch_size, input_length, 1,
-            hidden_dim].
+            1].
 
     Returns:
-      Inputs which will be passed to the model. [batch_size, input_length, 1,
-          1]
+      Inputs which will be passed to the model. [batch_size, input_length]
     """
     input_ids = features["inputs_raw"]
-    input_ids = tf.reshape(input_ids, tf.shape(input_ids)[:2])
-    attention_mask = tf.cast(tf.not_equal(input_ids, 0), dtype=tf.int32)
+    input_ids = tf.squeeze(input_ids, [2, 3])
+    attention_mask = tf.cast(tf.not_equal(input_ids, 0), dtype=tf.float32)
     return input_ids, attention_mask
 
 
