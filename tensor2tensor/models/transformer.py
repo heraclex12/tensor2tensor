@@ -43,7 +43,7 @@ from tensor2tensor.utils import t2t_model
 
 import tensorflow.compat.v1 as tf
 
-from transformers import TFBertModel
+from transformers import TFBertModel, BertConfig, TFBertMainLayer
 
 # pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.ops import inplace_ops
@@ -134,12 +134,11 @@ def bert_encode(encoder_function, inputs, attention_mask=None, **kwargs):
 
   encoder_decoder_attention_bias = common_attention.attention_bias_ignore_padding(attention_mask)
 
-  encoder_outputs = encoder_function(
+  encoder_output = encoder_function(
       inputs,
       attention_mask=attention_mask,
-  )
-  encoder_output = encoder_outputs[0]
-  print(encoder_output.shape)
+  )[0]
+  # encoder_output = encoder_outputs[0]
   return encoder_output, encoder_decoder_attention_bias
 
 
@@ -208,7 +207,6 @@ def transformer_decode(decoder_function,
   else:
     # Expand since t2t expects 4d tensors.
     return tf.expand_dims(decoder_output, axis=2)
-
 
 
 @registry.register_model
@@ -968,6 +966,13 @@ class Transformer(t2t_model.T2TModel):
         ret["outputs"] = ret["outputs"][:, :, partial_targets_length:]
     return ret
 
+
+class TFBertModelWithoutPooler(TFBertModel):
+    def __init__(self, config: BertConfig, *inputs, **kwargs):
+        super().__init__(config, *inputs, **kwargs)
+        self.bert = TFBertMainLayer(config, add_pooling_layer=False, name="bert")
+
+
 @registry.register_model
 class Bert2Rnd(Transformer):
   """Attention net.  See file docstring."""
@@ -976,7 +981,7 @@ class Bert2Rnd(Transformer):
     super(Bert2Rnd, self).__init__(*args, **kwargs)
     self.attention_weights = {}  # For visualizing attention heads.
     self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
-    self._encoder_function = TFBertModel.from_pretrained('bert-base-cased')
+    self._encoder_function = TFBertModelWithoutPooler.from_pretrained('bert-base-cased')
     self._decoder_function = transformer_decoder
     self._init_cache_fn = _init_transformer_cache
     self._prepare_encoder_fn = transformer_prepare_encoder
@@ -1070,9 +1075,9 @@ class Bert2Rnd(Transformer):
             1].
 
     Returns:
-      Inputs which will be passed to the model. [batch_size, input_length]
+      "inputs" and "attention_mask" which will be passed to the model. [batch_size, input_length]
     """
-    input_ids = features["inputs_raw"]
+    input_ids = features["inputs"]
     input_ids = tf.squeeze(input_ids, [2, 3])
     attention_mask = tf.cast(tf.not_equal(input_ids, 0), dtype=tf.float32)
     return input_ids, attention_mask
@@ -2415,6 +2420,16 @@ def transformer_small():
   hparams.hidden_size = 256
   hparams.filter_size = 1024
   hparams.num_heads = 4
+  return hparams
+
+
+@registry.register_hparams
+def transformer_as_bert():
+  hparams = transformer_base()
+  hparams.num_hidden_layers = 6
+  hparams.hidden_size = 768
+  hparams.filter_size = 3072
+  hparams.num_heads = 12
   return hparams
 
 
