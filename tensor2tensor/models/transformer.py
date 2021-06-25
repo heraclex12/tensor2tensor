@@ -970,14 +970,14 @@ class Transformer(t2t_model.T2TModel):
     return ret
 
 @registry.register_model
-class BERT2RND(Transformer):
+class Bert2Rnd(Transformer):
   """Attention net.  See file docstring."""
 
   def __init__(self, *args, **kwargs):
-    super(BERT2RND, self).__init__(*args, **kwargs)
+    super(Bert2Rnd, self).__init__(*args, **kwargs)
     self.attention_weights = {}  # For visualizing attention heads.
     self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
-    self._encoder_function = TFBertModel.from_pretrained('bert-base-cased', output_hidden_states=True)
+    self._encoder_function = TFBertModel.from_pretrained('bert-base-cased')
     self._decoder_function = transformer_decoder
     self._init_cache_fn = _init_transformer_cache
     self._prepare_encoder_fn = transformer_prepare_encoder
@@ -1074,7 +1074,10 @@ class BERT2RND(Transformer):
       Inputs which will be passed to the model. [batch_size, input_length, 1,
           1]
     """
-    return features["inputs_raw"], features["attention_mask"]
+    input_ids = features["inputs_raw"]
+    input_ids = tf.reshape(input_ids, tf.shape(input_ids)[:2])
+    attention_mask = tf.cast(tf.not_equal(input_ids, 0), dtype=tf.int32)
+    return input_ids, attention_mask
 
 
 
