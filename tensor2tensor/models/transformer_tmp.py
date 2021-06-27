@@ -134,7 +134,6 @@ def bert_encode(encoder_function, inputs, attention_mask=None, **kwargs):
   """
 
   encoder_decoder_attention_bias = common_attention.attention_bias_ignore_padding(attention_mask)
-  print(inputs)
   encoder_output = encoder_function(
       inputs,
       attention_mask=tf.cast(attention_mask, dtype=tf.int32),
@@ -991,40 +990,21 @@ class TFBertModelForTraining:
 
         self.max_seq_length = model_config['max_seq_length'] if 'max_seq_length' in model_config else 128
         print("Building tensorflow graph...")
-        self.__build_model__()
 
     def __build_model__(self,):
         self.inputs = {
             "input_ids": tf.placeholder(shape=[None, None], dtype=tf.int32),
             "input_mask": tf.placeholder(shape=[None, None], dtype=tf.int32),
         }
-
-        sequence_output = create_model(model_config=self.model_config,
-                                       input_ids=self.inputs['input_ids'],
-                                       input_mask=self.inputs['input_mask'],
-                                       is_training=False)
-
-        self.sequence_output = sequence_output
-        self.saver = tf.train.Saver()
-        self.sess = tf.Session()
-        self.sess.run(tf.global_variables_initializer())
-        if self.model_path:
-            self.saver.restore(self.sess, self.model_path)
-            print("Restored model at {}".format(self.model_path))
-    
-    def __call__(self, input_ids, attention_mask):
-        h = tf.get_session_handle(input_ids)
-        input_ids = self.sess.run(h)
-        h = tf.get_session_handle(attention_mask)
-        attention_mask = self.sess.run(h)
-        feed_dict = {
-            self.inputs['input_ids']: input_ids,
-            self.inputs['input_mask']: attention_mask
-        }
-        sequence_output = self.sess.run(
-            self.sequence_output, feed_dict=feed_dict)
+        return self.__call__(self.inputs['input_ids'], self.inputs['input_mask'])
         
-        return sequence_output
+    def __call__(self, input_ids, attention_mask):
+        self.sequence_output = create_model(model_config=self.model_config,
+                                       input_ids=input_ids,
+                                       input_mask=attention_mask,
+                                       is_training=False)
+        
+        return self.sequence_output
 
 
 def create_model(model_config, input_ids, input_mask, is_training=True):
@@ -1052,7 +1032,7 @@ class Bert2Rnd(Transformer):
     super(Bert2Rnd, self).__init__(*args, **kwargs)
     self.attention_weights = {}  # For visualizing attention heads.
     self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
-    self._encoder_function = model = TFBertModelForTraining({
+    self._encoder_function = TFBertModelForTraining({
                                     "model_config": "bert_model/bert_config.json",
                                     "vocab": "bert_model/vocab.txt",
                                     "model_path": "bert_model/bert_model.ckpt",
@@ -1156,6 +1136,44 @@ class Bert2Rnd(Transformer):
     input_ids = tf.squeeze(input_ids, [2, 3])
     attention_mask = tf.cast(tf.not_equal(input_ids, 0), dtype=tf.float32)
     return input_ids, attention_mask
+
+  # @classmethod
+  # def estimator_model_fn(self,   hparams,
+  #         features,
+  #         labels,
+  #         mode=None,
+  #         config=None,
+  #         params=None,
+  #         decode_hparams=None,
+  #         use_tpu=False):
+  #   ##
+  #   tvars = tf.trainable_variables()
+  #   init_checkpoint = 'bert_model/bert_model.ckpt'
+  #   initialized_variable_names = {}
+  #   scaffold_fn = None
+  #   if init_checkpoint:
+  #     (assignment_map, initialized_variable_names
+  #     ) = modeling.get_assignment_map_from_checkpoint(tvars, init_checkpoint)
+  #     if use_tpu:
+
+  #       def tpu_scaffold():
+  #         tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
+  #         return tf.train.Scaffold()
+
+  #       scaffold_fn = tpu_scaffold
+  #     else:
+  #       tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
+
+  #   return super(Bert2Rnd, self).estimator_model_fn(hparams=hparams,
+  #         features=features,
+  #         labels=labels,
+  #         mode=mode,
+  #         config=config,
+  #         params=params,
+  #         decode_hparams=decode_hparams,
+  #         use_tpu=use_tpu)
+
+
 
   def bottom(self, features):
     """Transforms features to feed into body.
