@@ -768,14 +768,14 @@ class Transformer(t2t_model.T2TModel):
         decode_length = (
             inputs_shape[1] + features.get("decode_length", decode_length))
       batch_size = inputs_shape[0]
-      inputs = self._prepare_inputs_for_decode(features)
+      if len(inputs_shape) < 4:
+        features['inputs'] = tf.expand_dims(features['inputs'], axis=-1)
+      inputs, attention_mask = self._prepare_inputs_for_bert_body(features)
       with tf.variable_scope("body"):
         encoder_output, encoder_decoder_attention_bias = dp(
             self.encode,
             inputs,
-            features["target_space_id"],
-            hparams,
-            features=features)
+            attention_mask)
       encoder_output = encoder_output[0]
       encoder_decoder_attention_bias = encoder_decoder_attention_bias[0]
       partial_targets = features.get("partial_targets")
@@ -989,6 +989,7 @@ class TFBertModelForTraining:
                       vocab_file=vocab, do_lower_case=do_lower_case)
 
         self.max_seq_length = model_config['max_seq_length'] if 'max_seq_length' in model_config else 128
+        self.is_training = model_config['is_training']
         print("Building tensorflow graph...")
 
     def __build_model__(self,):
@@ -1002,7 +1003,7 @@ class TFBertModelForTraining:
         self.sequence_output = create_model(model_config=self.model_config,
                                        input_ids=input_ids,
                                        input_mask=attention_mask,
-                                       is_training=False)
+                                       is_training=self.is_training)
         
         return self.sequence_output
 
@@ -1036,6 +1037,7 @@ class Bert2Rnd(Transformer):
                                     "model_config": "bert_model/bert_config.json",
                                     "vocab": "bert_model/vocab.txt",
                                     "model_path": "bert_model/bert_model.ckpt",
+                                    "is_training": self._hparams.mode == tf.estimator.ModeKeys.TRAIN
                                 })
     self._decoder_function = transformer_decoder
     self._init_cache_fn = _init_transformer_cache
