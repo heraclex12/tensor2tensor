@@ -40,6 +40,7 @@ from tensor2tensor.utils import expert_utils
 from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
+from tensor2tensor.utils import contrib
 
 import tensorflow.compat.v1 as tf
 
@@ -1138,44 +1139,6 @@ class Bert2Rnd(Transformer):
     input_ids = tf.squeeze(input_ids, [2, 3])
     attention_mask = tf.to_int32(tf.not_equal(input_ids, 0))
     return input_ids, attention_mask
-
-  # @classmethod
-  # def estimator_model_fn(self,   hparams,
-  #         features,
-  #         labels,
-  #         mode=None,
-  #         config=None,
-  #         params=None,
-  #         decode_hparams=None,
-  #         use_tpu=False):
-  #   ##
-  #   tvars = tf.trainable_variables()
-  #   init_checkpoint = 'bert_model/bert_model.ckpt'
-  #   initialized_variable_names = {}
-  #   scaffold_fn = None
-  #   if init_checkpoint:
-  #     (assignment_map, initialized_variable_names
-  #     ) = modeling.get_assignment_map_from_checkpoint(tvars, init_checkpoint)
-  #     if use_tpu:
-
-  #       def tpu_scaffold():
-  #         tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
-  #         return tf.train.Scaffold()
-
-  #       scaffold_fn = tpu_scaffold
-  #     else:
-  #       tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
-
-  #   return super(Bert2Rnd, self).estimator_model_fn(hparams=hparams,
-  #         features=features,
-  #         labels=labels,
-  #         mode=mode,
-  #         config=config,
-  #         params=params,
-  #         decode_hparams=decode_hparams,
-  #         use_tpu=use_tpu)
-
-
 
   def bottom(self, features):
     """Transforms features to feed into body.
