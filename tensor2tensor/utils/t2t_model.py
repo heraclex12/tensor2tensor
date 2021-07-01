@@ -2342,6 +2342,9 @@ def initialize_from_ckpt(ckpt_dir, hparams):
   variable_map = {}
   for var in contrib.framework().get_trainable_variables():
     var_name = var.name.split(":")[0]
+    if '/bert/' in var_name:
+      var_name = var_name[var_name.index('/bert/')+1:]
+
     if reader.has_tensor(var_name):
       tf.logging.info("Loading variable from checkpoint: %s", var_name)
       variable_map[var_name] = var
