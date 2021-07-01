@@ -2328,7 +2328,7 @@ def _create_target_modality(modality_dict):
   return {k: v for k, v in six.iteritems(modality_dict) if "target" in k
           and k != "targets_segmentation" and k != "targets_position"}
 
-
+#### EDITED
 def initialize_from_ckpt(ckpt_dir, hparams):
   """Initialize variables from given directory."""
   model_dir = hparams.get("model_dir", None)
