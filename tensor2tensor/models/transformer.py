@@ -139,7 +139,7 @@ def bert_encode(encoder_function, inputs, attention_mask=None, **kwargs):
       inputs,
       attention_mask=attention_mask,
   )
-  print(encoder_output)
+  # print(encoder_output)
   # encoder_output = encoder_outputs[0]
   return encoder_output, encoder_decoder_attention_bias
 
@@ -512,14 +512,14 @@ class Transformer(t2t_model.T2TModel):
         decode_length = (
             inputs_shape[1] + features.get("decode_length", decode_length))
       batch_size = inputs_shape[0]
-      inputs = self._prepare_inputs_for_decode(features)
+      if len(inputs_shape) < 4:
+        features['inputs'] = tf.expand_dims(features['inputs'], axis=-1)
+      inputs, attention_mask = self._prepare_inputs_for_bert_body(features)
       with tf.variable_scope("body"):
         encoder_output, encoder_decoder_attention_bias = dp(
             self.encode,
             inputs,
-            features["target_space_id"],
-            hparams,
-            features=features)
+            attention_mask)
       encoder_output = encoder_output[0]
       encoder_decoder_attention_bias = encoder_decoder_attention_bias[0]
       partial_targets = None
