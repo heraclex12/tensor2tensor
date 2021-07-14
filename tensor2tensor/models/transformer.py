@@ -122,7 +122,8 @@ def bert_encode(encoder_function, inputs, attention_mask=None, **kwargs):
 
   Args:
     encoder_function: the encoder function
-    inputs: Transformer inputs [batch_size, input_length].
+    inputs: Transformer inputs [batch_size, input_length, 1, hidden_dim] which
+      will be flattened along the two spatial dimensions.
     attention_mask: mask to store attention to.
 
   Returns:
@@ -151,7 +152,8 @@ def bert_decode(decoder_function,
 
   Args:
     decoder_function: the decoder function
-    decoder_input: inputs to bottom of the model. [batch_size, decoder_length]
+    decoder_input: inputs to bottom of the model. [batch_size, decoder_length,
+      hidden_dim]
     encoder_output: Encoder representation. [batch_size, input_length,
       hidden_dim]
     encoder_attention_mask: Bias and mask weights for encoder-decoder
@@ -1298,7 +1300,7 @@ class Bert2Bert(Transformer):
 
     targets = features["targets"]
     targets_shape = common_layers.shape_list(targets)
-    decoder_input, decoder_self_attention_bias = self._prepare_targets_for_bert_body(features)
+    decoder_input, decoder_attention_mask = self._prepare_targets_for_bert_body(features)
 
     # Not all subclasses of Transformer support keyword arguments related to
     # recurrent memory, so only pass these arguments if memory is enabled.
@@ -1323,8 +1325,8 @@ class Bert2Bert(Transformer):
     decoder_output = self.decode(
         decoder_input,
         encoder_output,
-        encoder_decoder_attention_bias,
-        decoder_self_attention_bias,
+        attention_mask,
+        decoder_attention_mask,
         **decode_kwargs
         )
     expected_attentions = features.get("expected_attentions")
@@ -1398,41 +1400,6 @@ class Bert2Bert(Transformer):
       return features
 
     transformed_features = collections.OrderedDict()
-    all_previous_modalities = []
-    target_modality = _create_target_modality(self._problem_hparams.modality)
-
-    # Transform features via its corresponding modality.
-    for feature_name, modality in sorted(
-        six.iteritems(self._problem_hparams.modality)):
-      if feature_name not in features:
-        tf.logging.warning("Missing feature %s - ignoring." % feature_name)
-        continue
-      vocab_size = self._problem_hparams.vocab_size[feature_name]
-      if vocab_size is not None and hasattr(self._hparams, "vocab_divisor"):
-        vocab_size += (-vocab_size) % self._hparams.vocab_divisor
-      modality_name = self._hparams.name.get(
-          feature_name,
-          modalities.get_name(modality))(self._hparams, vocab_size)
-      # Use if-else clauses to preserve behavior of previous changes: namely,
-      # the variable scope name for the targets feature if there is only one
-      # target modality; and to reuse variable scopes for only input modalities.
-      if feature_name in target_modality:
-        if len(target_modality) > 1:
-          variable_scope_name = "%s/%s" % (modality_name, feature_name)
-        else:
-          variable_scope_name = modality_name
-        bottom = self._hparams.bottom.get(
-            feature_name,
-            modalities.get_targets_bottom(modality))
-        # TODO(aidangomez): share variables?
-        with tf.variable_scope(variable_scope_name) as vs:
-          self._add_variable_scope(variable_scope_name, vs)
-          tf.logging.info("Transforming feature '%s' with %s.targets_bottom",
-                   feature_name,
-                   modality_name)
-          transformed_features[feature_name] = bottom(features[feature_name],
-                                                      self._hparams,
-                                                      vocab_size)
 
     for key in features:
       if key not in transformed_features:
