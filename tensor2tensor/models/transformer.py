@@ -122,8 +122,7 @@ def bert_encode(encoder_function, inputs, attention_mask=None, **kwargs):
 
   Args:
     encoder_function: the encoder function
-    inputs: Transformer inputs [batch_size, input_length, 1, hidden_dim] which
-      will be flattened along the two spatial dimensions.
+    inputs: Transformer inputs [batch_size, input_length].
     attention_mask: mask to store attention to.
 
   Returns:
@@ -152,8 +151,7 @@ def bert_decode(decoder_function,
 
   Args:
     decoder_function: the decoder function
-    decoder_input: inputs to bottom of the model. [batch_size, decoder_length,
-      hidden_dim]
+    decoder_input: inputs to bottom of the model. [batch_size, decoder_length]
     encoder_output: Encoder representation. [batch_size, input_length,
       hidden_dim]
     encoder_attention_mask: Bias and mask weights for encoder-decoder
