@@ -139,9 +139,51 @@ def bert_encode(encoder_function, inputs, attention_mask=None, **kwargs):
       inputs,
       attention_mask=attention_mask,
   )
-  # print(encoder_output)
-  # encoder_output = encoder_outputs[0]
   return encoder_output, encoder_decoder_attention_bias
+
+
+def bert_decode(decoder_function,
+                       decoder_input,
+                       encoder_output,
+                       encoder_attention_mask,
+                       decoder_attention_mask,
+                       **kwargs):
+  """Decode Transformer outputs from encoder representation.
+
+  Args:
+    decoder_function: the decoder function
+    decoder_input: inputs to bottom of the model. [batch_size, decoder_length,
+      hidden_dim]
+    encoder_output: Encoder representation. [batch_size, input_length,
+      hidden_dim]
+    encoder_attention_mask: Bias and mask weights for encoder-decoder
+      attention. [batch_size, input_length]
+    decoder_attention_mask: Bias and mask weights for decoder
+      self-attention. [batch_size, decoder_length]
+    **kwargs: additional arguments to pass to decoder_function
+
+  Returns:
+    Final decoder representation. [batch_size, decoder_length, hidden_dim]
+  """
+  mlperf_log.transformer_print(
+      key=mlperf_log.MODEL_HP_LAYER_POSTPROCESS_DROPOUT,
+      value=hparams.layer_prepostprocess_dropout,
+      hparams=hparams)
+
+  decoder_output = decoder_function(
+      decoder_input,
+      encoder_output,
+      decoder_attention_mask,
+      encoder_attention_mask)
+
+  if (common_layers.is_xla_compiled() and
+      hparams.mode == tf.estimator.ModeKeys.TRAIN):
+    # TPU does not react kindly to extra dimensions.
+    # TODO(noam): remove this once TPU is more forgiving of extra dims.
+    return decoder_output
+  else:
+    # Expand since t2t expects 4d tensors.
+    return tf.expand_dims(decoder_output, axis=2)
 
 
 def transformer_decode(decoder_function,
@@ -979,17 +1021,7 @@ class TFBertModelForTraining:
                     model_config["model_config"])
             elif isinstance(model_config["model_config"], modeling.BertConfig):
                 self.model_config = model_config
-        else:
-            self.model_config = get_context_config()
 
-        self.model_path = model_config['model_path'] if 'model_path' in model_config else None
-        do_lower_case = True if "do_lower_case" not in model_config or model_config[
-            "do_lower_case"] else False
-        vocab = "bert_model/vocab.txt" if "vocab" not in model_config else model_config['vocab']
-        self.tokenizer =  tokenization.FullTokenizer(
-                      vocab_file=vocab, do_lower_case=do_lower_case)
-
-        self.max_seq_length = model_config['max_seq_length'] if 'max_seq_length' in model_config else 128
         self.is_training = model_config['is_training']
         print("Building tensorflow graph...")
 
@@ -1022,10 +1054,6 @@ def create_model(model_config, input_ids, input_mask, is_training=True):
     return encoder_output
 
 
-def get_context_config(size='base'):
-    return modeling.BertConfig.from_json_file('bert_model/bert_config.json')
-
-
 @registry.register_model
 class Bert2Rnd(Transformer):
   """Attention net.  See file docstring."""
@@ -1035,9 +1063,7 @@ class Bert2Rnd(Transformer):
     self.attention_weights = {}  # For visualizing attention heads.
     self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
     self._encoder_function = TFBertModelForTraining({
-                                    "model_config": "bert_model/bert_config.json",
-                                    "vocab": "bert_model/vocab.txt",
-                                    "model_path": "bert_model/bert_model.ckpt",
+                                    "model_config": self._hparams.encoder_config,
                                     "is_training": self._hparams.mode == tf.estimator.ModeKeys.TRAIN
                                 })
     self._decoder_function = transformer_decoder
@@ -1136,6 +1162,215 @@ class Bert2Rnd(Transformer):
       "inputs" and "attention_mask" which will be passed to the model. [batch_size, input_length]
     """
     input_ids = features["inputs"]
+    input_ids = tf.squeeze(input_ids, [2, 3])
+    attention_mask = tf.to_int32(tf.not_equal(input_ids, 0))
+    return input_ids, attention_mask
+
+  def bottom(self, features):
+    """Transforms features to feed into body.
+
+    Args:
+      features: dict of str to Tensor. Typically it is the preprocessed data
+        batch after Problem's preprocess_example().
+
+    Returns:
+      transformed_features: dict of same key-value pairs as features. The value
+        Tensors are newly transformed.
+    """
+    import collections
+    import six
+    def _create_target_modality(modality_dict):
+      # TODO(trandustin): We require this in order to apply methods utilized
+      # differently for modalities which are "targets"
+      # (e.g., modality.target_bottom). In the future, remove need for this
+      # behavior.
+      return {k: v for k, v in six.iteritems(modality_dict) if "target" in k
+              and k != "targets_segmentation" and k != "targets_position"}
+    if not self._problem_hparams:
+      tf.logging.warning("Without a Problem, T2TModel.bottom is a passthrough.")
+      return features
+
+    transformed_features = collections.OrderedDict()
+    all_previous_modalities = []
+    target_modality = _create_target_modality(self._problem_hparams.modality)
+
+    # Transform features via its corresponding modality.
+    for feature_name, modality in sorted(
+        six.iteritems(self._problem_hparams.modality)):
+      if feature_name not in features:
+        tf.logging.warning("Missing feature %s - ignoring." % feature_name)
+        continue
+      vocab_size = self._problem_hparams.vocab_size[feature_name]
+      if vocab_size is not None and hasattr(self._hparams, "vocab_divisor"):
+        vocab_size += (-vocab_size) % self._hparams.vocab_divisor
+      modality_name = self._hparams.name.get(
+          feature_name,
+          modalities.get_name(modality))(self._hparams, vocab_size)
+      # Use if-else clauses to preserve behavior of previous changes: namely,
+      # the variable scope name for the targets feature if there is only one
+      # target modality; and to reuse variable scopes for only input modalities.
+      if feature_name in target_modality:
+        if len(target_modality) > 1:
+          variable_scope_name = "%s/%s" % (modality_name, feature_name)
+        else:
+          variable_scope_name = modality_name
+        bottom = self._hparams.bottom.get(
+            feature_name,
+            modalities.get_targets_bottom(modality))
+        # TODO(aidangomez): share variables?
+        with tf.variable_scope(variable_scope_name) as vs:
+          self._add_variable_scope(variable_scope_name, vs)
+          tf.logging.info("Transforming feature '%s' with %s.targets_bottom",
+                   feature_name,
+                   modality_name)
+          transformed_features[feature_name] = bottom(features[feature_name],
+                                                      self._hparams,
+                                                      vocab_size)
+
+    for key in features:
+      if key not in transformed_features:
+        # For features without a modality, we pass them along as is
+        transformed_features[key] = features[key]
+      else:
+        # Other features get passed along with the "raw" suffix
+        transformed_features[key + "_raw"] = features[key]
+    return transformed_features
+
+
+@registry.register_model
+class Bert2Bert(Transformer):
+  """Attention net.  See file docstring."""
+
+  def __init__(self, *args, **kwargs):
+    super(Bert2Rnd, self).__init__(*args, **kwargs)
+    self.attention_weights = {}  # For visualizing attention heads.
+    self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
+    self._encoder_function = TFBertModelForTraining({
+                                    "model_config": self._hparams.encoder_config,
+                                    "is_training": self._hparams.mode == tf.estimator.ModeKeys.TRAIN
+                                })
+    self._decoder_function = TFBertModelForTraining({
+                                    "model_config": self._hparams.decoder_config,
+                                    "is_training": self._hparams.mode == tf.estimator.ModeKeys.TRAIN
+                                })
+    self._init_cache_fn = _init_transformer_cache
+    self._prepare_encoder_fn = transformer_prepare_encoder
+    self._prepare_decoder_fn = transformer_prepare_decoder
+
+  def encode(self, inputs, attention_mask):
+    """Encode BERT inputs, see bert_encode."""
+    return bert_encode(
+        self._encoder_function, inputs, attention_mask)
+
+  def decode(self,
+             decoder_input,
+             encoder_output,
+             encoder_attention_mask,
+             decoder_attention_mask,
+             **kwargs):
+    """Decode BERT outputs, see bert_decode."""
+    return bert_decode(
+        self._decoder_function, decoder_input, encoder_output,
+        encoder_attention_mask, decoder_attention_mask,
+        **kwargs)
+
+  def body(self, features):
+    """Transformer main model_fn.
+
+    Args:
+      features: Map of features to the model. Should contain the following:
+          "inputs": Transformer inputs. [batch_size, input_length, 1,
+            hidden_dim].
+          "targets": Target decoder outputs. [batch_size, decoder_length, 1,
+            hidden_dim]
+
+    Returns:
+      Final decoder representation. [batch_size, decoder_length, hidden_dim]
+    """
+    hparams = self._hparams
+
+    losses = []
+
+    if self.has_input:
+      inputs, attention_mask = self._prepare_inputs_for_bert_body(features)
+      encoder_output, encoder_decoder_attention_bias = self.encode(
+          inputs, attention_mask)
+    else:
+      encoder_output, encoder_decoder_attention_bias = (None, None)
+
+    targets = features["targets"]
+    targets_shape = common_layers.shape_list(targets)
+    decoder_input, decoder_self_attention_bias = self._prepare_targets_for_bert_body(features)
+
+    # Not all subclasses of Transformer support keyword arguments related to
+    # recurrent memory, so only pass these arguments if memory is enabled.
+    decode_kwargs = {}
+    if self.recurrent_memory_by_layer is not None:
+      # TODO(kitaev): The chunk_number feature currently has the same shape as
+      # "targets", but this is only for the purposes of sharing sharding code.
+      # In fact every token within an example must have the same chunk number.
+      chunk_number_each_token = tf.squeeze(features["chunk_number"], (-1, -2))
+      chunk_number_each_example = chunk_number_each_token[:, 0]
+      # Uncomment the code below to verify that tokens within a batch share the
+      # same chunk number:
+      # with tf.control_dependencies([
+      #     tf.assert_equal(chunk_number_each_token,
+      #                     chunk_number_each_example[:, None])
+      # ]):
+      #   chunk_number_each_example = tf.identity(chunk_number_each_example)
+      decode_kwargs = dict(
+          recurrent_memory_by_layer=self.recurrent_memory_by_layer,
+          chunk_number=chunk_number_each_example,
+          )
+    decoder_output = self.decode(
+        decoder_input,
+        encoder_output,
+        encoder_decoder_attention_bias,
+        decoder_self_attention_bias,
+        **decode_kwargs
+        )
+    expected_attentions = features.get("expected_attentions")
+    if expected_attentions is not None:
+      attention_loss = common_attention.encoder_decoder_attention_loss(
+          expected_attentions, self.attention_weights,
+          hparams.expected_attention_loss_type,
+          hparams.expected_attention_loss_multiplier)
+      return decoder_output, {"attention_loss": attention_loss}
+
+    ret = tf.reshape(decoder_output, targets_shape)
+    if losses:
+      return ret, {"extra_loss": tf.add_n(losses)}
+    else:
+      return ret
+
+  def _prepare_inputs_for_bert_body(self, features):
+    """Prepare inputs for body.
+
+    Args:
+      features: Map of string to model features. Should contain
+          "inputs": Transformer inputs. [batch_size, input_length, 1,
+            1].
+
+    Returns:
+      "inputs" and "attention_mask" which will be passed to the model. [batch_size, input_length]
+    """
+    input_ids = features["inputs"]
+    input_ids = tf.squeeze(input_ids, [2, 3])
+    attention_mask = tf.to_int32(tf.not_equal(input_ids, 0))
+    return input_ids, attention_mask
+
+  def _prepare_targets_for_bert_body(self, features):
+    """Prepare targets for body.
+
+    Args:
+      features: Map of string to model features. Should contain
+          "targets": Transformer targets. [batch_size, input_length, 1,
+            1].
+
+    Returns:
+      "inputs" and "attention_mask" which will be passed to the model. [batch_size, input_length]
+    """
+    input_ids = features["targets"]
     input_ids = tf.squeeze(input_ids, [2, 3])
     attention_mask = tf.to_int32(tf.not_equal(input_ids, 0))
     return input_ids, attention_mask
@@ -2557,6 +2792,9 @@ def transformer_as_bert():
   hparams.hidden_size = 768
   hparams.filter_size = 3072
   hparams.num_heads = 12
+
+  hparams.add_hparam('encoder_config', '')
+  hparams.add_hparam('decoder_config', '')
   return hparams
 
 
