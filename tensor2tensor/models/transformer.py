@@ -147,6 +147,7 @@ def bert_decode(decoder_function,
                        encoder_output,
                        encoder_attention_mask,
                        decoder_attention_mask,
+                       hparams,
                        **kwargs):
   """Decode Transformer outputs from encoder representation.
 
@@ -172,8 +173,8 @@ def bert_decode(decoder_function,
 
   decoder_output = decoder_function(
       decoder_input,
-      encoder_output,
       decoder_attention_mask,
+      encoder_output,
       encoder_attention_mask)
 
   if (common_layers.is_xla_compiled() and
@@ -1011,7 +1012,7 @@ class Transformer(t2t_model.T2TModel):
     return ret
 
 
-class TFBertModelForTraining:
+class TFBertModelForEncoder:
 
     def __init__(self, model_config=None):
         if model_config is None: model_config = {}
@@ -1033,7 +1034,7 @@ class TFBertModelForTraining:
         return self.__call__(self.inputs['input_ids'], self.inputs['input_mask'])
         
     def __call__(self, input_ids, attention_mask):
-        self.sequence_output = create_model(model_config=self.model_config,
+        self.sequence_output = create_encoder(model_config=self.model_config,
                                        input_ids=input_ids,
                                        input_mask=attention_mask,
                                        is_training=self.is_training)
@@ -1041,13 +1042,61 @@ class TFBertModelForTraining:
         return self.sequence_output
 
 
-def create_model(model_config, input_ids, input_mask, is_training=True):
+def create_encoder(model_config, input_ids, input_mask, is_training=True):
 
-    model = modeling.BertModel(
+    model = modeling.BertEncoder(
         config=model_config,
         is_training=is_training,
         input_ids=input_ids,
         input_mask=input_mask,
+        use_one_hot_embeddings=False)
+
+    encoder_output = model.get_sequence_output()
+    return encoder_output
+
+
+class TFBertModelForDecoder:
+
+    def __init__(self, model_config=None):
+        if model_config is None: model_config = {}
+        if "model_config" in model_config:
+            if isinstance(model_config["model_config"], str):
+                self.model_config = modeling.BertConfig.from_json_file(
+                    model_config["model_config"])
+            elif isinstance(model_config["model_config"], modeling.BertConfig):
+                self.model_config = model_config
+
+        self.is_training = model_config['is_training']
+        print("Building tensorflow graph...")
+
+    def __build_model__(self,):
+        self.inputs = {
+            "input_ids": tf.placeholder(shape=[None, None], dtype=tf.int32),
+            "input_mask": tf.placeholder(shape=[None, None], dtype=tf.int32),
+        }
+        return self.__call__(self.inputs['input_ids'], self.inputs['input_mask'])
+        
+    def __call__(self, input_ids, attention_mask, encoder_output_tensor=None, encoder_attention_mask=None):
+        self.sequence_output = create_decoder(model_config=self.model_config,
+                                       input_ids=input_ids,
+                                       input_mask=attention_mask,
+                                       encoder_output_tensor=encoder_output_tensor,
+                                       encoder_attention_mask=encoder_attention_mask,
+                                       is_training=self.is_training)
+        
+        return self.sequence_output
+
+
+def create_decoder(model_config, input_ids, input_mask, encoder_output_tensor=None,
+               encoder_attention_mask=None, is_training=True):
+
+    model = modeling.BertDecoder(
+        config=model_config,
+        is_training=is_training,
+        input_ids=input_ids,
+        input_mask=input_mask,
+        encoder_output_tensor=encoder_output_tensor,
+        encoder_attention_mask=encoder_attention_mask,
         use_one_hot_embeddings=False)
 
     encoder_output = model.get_sequence_output()
@@ -1062,7 +1111,7 @@ class Bert2Rnd(Transformer):
     super(Bert2Rnd, self).__init__(*args, **kwargs)
     self.attention_weights = {}  # For visualizing attention heads.
     self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
-    self._encoder_function = TFBertModelForTraining({
+    self._encoder_function = TFBertModelForEncoder({
                                     "model_config": self._hparams.encoder_config,
                                     "is_training": self._hparams.mode == tf.estimator.ModeKeys.TRAIN
                                 })
@@ -1242,14 +1291,14 @@ class Bert2Bert(Transformer):
   """Attention net.  See file docstring."""
 
   def __init__(self, *args, **kwargs):
-    super(Bert2Rnd, self).__init__(*args, **kwargs)
+    super(Bert2Bert, self).__init__(*args, **kwargs)
     self.attention_weights = {}  # For visualizing attention heads.
     self.recurrent_memory_by_layer = None  # Override to enable recurrent memory
-    self._encoder_function = TFBertModelForTraining({
+    self._encoder_function = TFBertModelForEncoder({
                                     "model_config": self._hparams.encoder_config,
                                     "is_training": self._hparams.mode == tf.estimator.ModeKeys.TRAIN
                                 })
-    self._decoder_function = TFBertModelForTraining({
+    self._decoder_function = TFBertModelForDecoder({
                                     "model_config": self._hparams.decoder_config,
                                     "is_training": self._hparams.mode == tf.estimator.ModeKeys.TRAIN
                                 })
@@ -1267,11 +1316,12 @@ class Bert2Bert(Transformer):
              encoder_output,
              encoder_attention_mask,
              decoder_attention_mask,
+             hparams,
              **kwargs):
     """Decode BERT outputs, see bert_decode."""
     return bert_decode(
         self._decoder_function, decoder_input, encoder_output,
-        encoder_attention_mask, decoder_attention_mask,
+        encoder_attention_mask, decoder_attention_mask, hparams,
         **kwargs)
 
   def body(self, features):
@@ -1327,6 +1377,7 @@ class Bert2Bert(Transformer):
         encoder_output,
         attention_mask,
         decoder_attention_mask,
+        hparams,
         **decode_kwargs
         )
     expected_attentions = features.get("expected_attentions")
@@ -1337,7 +1388,7 @@ class Bert2Bert(Transformer):
           hparams.expected_attention_loss_multiplier)
       return decoder_output, {"attention_loss": attention_loss}
 
-    ret = tf.reshape(decoder_output, targets_shape)
+    ret = tf.expand_dims(decoder_output, axis=2)
     if losses:
       return ret, {"extra_loss": tf.add_n(losses)}
     else:
