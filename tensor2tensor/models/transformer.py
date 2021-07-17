@@ -153,8 +153,7 @@ def bert_decode(decoder_function,
 
   Args:
     decoder_function: the decoder function
-    decoder_input: inputs to bottom of the model. [batch_size, decoder_length,
-      hidden_dim]
+    decoder_input: inputs to bottom of the model. [batch_size, decoder_length]
     encoder_output: Encoder representation. [batch_size, input_length,
       hidden_dim]
     encoder_attention_mask: Bias and mask weights for encoder-decoder
@@ -166,11 +165,6 @@ def bert_decode(decoder_function,
   Returns:
     Final decoder representation. [batch_size, decoder_length, hidden_dim]
   """
-  mlperf_log.transformer_print(
-      key=mlperf_log.MODEL_HP_LAYER_POSTPROCESS_DROPOUT,
-      value=hparams.layer_prepostprocess_dropout,
-      hparams=hparams)
-
   decoder_output = decoder_function(
       decoder_input,
       decoder_attention_mask,
@@ -383,20 +377,6 @@ class Transformer(t2t_model.T2TModel):
           hidden_dim]
     """
     return features["inputs"]
-
-  def _prepare_inputs_for_bert_body(self, features):
-    """Prepare inputs for body.
-
-    Args:
-      features: Map of string to model features. Should contain
-          "inputs": Transformer inputs. [batch_size, input_length, 1,
-            hidden_dim].
-
-    Returns:
-      Inputs which will be passed to the model. [batch_size, input_length, 1,
-          1]
-    """
-    return features["inputs_raw"], features["attention_mask"]
 
   def _greedy_infer(self, features, decode_length, use_tpu=False):
     """Fast version of greedy decoding.
@@ -2811,6 +2791,9 @@ def transformer_as_bert():
 
   hparams.add_hparam('encoder_config', '')
   hparams.add_hparam('decoder_config', '')
+  hparams.add_hparam('encoder_scope', 'bert')
+  hparams.add_hparam('decoder_scope', 'bertclm')
+  hparams.add_hparam('ckpt_model_name', 'bert')
   return hparams
 
 
