@@ -1547,8 +1547,8 @@ class T2TModel(base.Layer):
     return model.estimator_spec_train(
         loss, num_async_replicas=num_async_replicas, use_tpu=use_tpu)
 
-  def initialize_from_ckpt(self, ckpt_dir):
-    return initialize_from_ckpt(ckpt_dir=ckpt_dir, hparams=self._hparams)
+  def initialize_from_ckpt(self, ckpt_dir, scope_map=None):
+    return initialize_from_ckpt(ckpt_dir=ckpt_dir, hparams=self._hparams, scope_map=scope_map)
 
   def create_train_host_call(self):
     return create_host_call(self.hparams.model_dir)
@@ -1567,7 +1567,9 @@ class T2TModel(base.Layer):
     if use_tpu:
       if self._hparams.warm_start_from:
         def scaffold_fn():
-          self.initialize_from_ckpt(self._hparams.warm_start_from)
+          self.initialize_from_ckpt(self._hparams.warm_start_from, scope_map=(self._hparams.ckpt_model_name, self._hparams.encoder_scope))
+          if self._hparams.warm_start_from_second:
+            self.initialize_from_ckpt(self._hparams.warm_start_from_second, scope_map=(self._hparams.ckpt_model_name, self._hparams.decoder_scope))
           return tf.train.Scaffold()
       else:
         scaffold_fn = None
@@ -2329,7 +2331,7 @@ def _create_target_modality(modality_dict):
           and k != "targets_segmentation" and k != "targets_position"}
 
 #### EDITED
-def initialize_from_ckpt(ckpt_dir, hparams):
+def initialize_from_ckpt(ckpt_dir, hparams, scope_map=None):
   """Initialize variables from given directory."""
   model_dir = hparams.get("model_dir", None)
   already_has_ckpt = (
@@ -2340,13 +2342,18 @@ def initialize_from_ckpt(ckpt_dir, hparams):
   tf.logging.info("Checkpoint dir: %s", ckpt_dir)
   reader = contrib.framework().load_checkpoint(ckpt_dir)
   variable_map = {}
+  if scope_map is not None:
+    ckpt_name, component_name = scope_map
+
   for var in contrib.framework().get_trainable_variables():
     var_name = var.name.split(":")[0]
-    if '/bert/' in var_name:
-      var_name = var_name[var_name.index('/bert/')+1:]
+    comp_pattern = f'/{component_name}/'
+    old_var_name = var_name
+    if comp_pattern in var_name:
+      var_name = ckpt_name + var_name[var_name.index(comp_pattern)+len(comp_pattern)-1:]
 
     if reader.has_tensor(var_name):
-      tf.logging.info("Loading variable from checkpoint: %s", var_name)
+      tf.logging.info("Loading variable from checkpoint: %s", old_var_name)
       variable_map[var_name] = var
     else:
       tf.logging.info("Cannot find variable in checkpoint, skipping: %s",
