@@ -1676,6 +1676,78 @@ class Bert2Bert(Transformer):
       else:
         ret["outputs"] = ret["outputs"][:, :, partial_targets_length:]
     return ret
+  
+  def _loss_single(self, logits, feature_name, feature, weights=None):
+    # The current bfloat16 version still uses float32 for most parts of backward
+    # propagation to keep model quality, so cast back before computing the loss
+    # value.
+    if not self._problem_hparams:
+      log_warn(_no_problem_err("loss"))
+      return (tf.constant(0., dtype=tf.float32),
+              tf.constant(1., dtype=tf.float32))
+
+    # Calculate loss contribution.
+    modality = self._problem_hparams.modality[feature_name]
+    vocab_size = self._problem_hparams.vocab_size[feature_name]
+    if vocab_size is not None and hasattr(self._hparams, "vocab_divisor"):
+      vocab_size += (-vocab_size) % self._hparams.vocab_divisor
+    loss = self._hparams.loss.get(feature_name, modalities.get_loss(modality))
+    targets_weights_fn = self._hparams.weights_fn.get(
+        "targets", modalities.get_weights_fn(modality))
+
+    # Shift right
+    logits = logits[:, :-1, ...]
+    feature = feature[:, 1:, ...]
+    if weights is None:
+      loss_num, loss_den = loss(logits, feature, self._hparams, vocab_size,
+                                weights_fn=targets_weights_fn)
+    else:
+
+      def weights_fn(labels):
+        """Per-token weights for loss."""
+        # Use target_weights_fn() given by modality as well as explicitly given
+        # weights.
+        modality_weights = targets_weights_fn(labels)
+
+        # Broadcast 'weights' along minor dimensions (TF's default is major).
+        explicit_weights = weights
+        if len(explicit_weights.shape) < len(modality_weights.shape):
+          explicit_weights = common_layers.expand_squeeze_to_nd(
+              weights, modality_weights.shape.ndims)
+
+        return explicit_weights * modality_weights
+
+      # Ensure that target.modality_loss() supports "weights_fn" keyword
+      # argument. If it doesn't and "weights" is specified, raise an exception.
+      argument_names = inspect.getargspec(loss).args
+      if "weights_fn" not in argument_names:
+        raise ValueError(
+            "Explicit 'weights' given but default loss for modality doesn't "
+            "support 'weights_fn' keyword argument: %s.loss(%s)." %
+            (modality, ", ".join(argument_names)))
+
+      loss_num, loss_den = loss(
+          logits, feature, self._hparams, vocab_size, weights_fn=weights_fn)
+
+    loss_num *= self._problem_hparams.loss_multiplier
+
+    if hasattr(self.hparams, "problem") and hasattr(
+        self.hparams.problem, "task_list"):
+      if weights is not None:
+        raise NotImplementedError("weights not yet implemented in "
+                                  "multitask setting.")
+      loss_num, loss_den, summaries = multi_problem.aggregate_task_losses(
+          self.hparams,
+          self._problem_hparams,
+          logits,
+          feature_name,
+          feature
+      )
+
+      for key, val in summaries:
+        tf.summary.scalar(key, val)
+
+    return loss_num, loss_den
 
 
 def _init_transformer_cache(cache, hparams, batch_size, attention_init_length,
