@@ -14,17 +14,13 @@
 # limitations under the License.
 
 r"""Decode from trained T2T models.
-
 This binary performs inference using the Estimator API.
-
 Example usage to decode from dataset:
-
   t2t-decoder \
       --data_dir ~/data \
       --problem=algorithmic_identity_binary40 \
       --model=transformer
       --hparams_set=transformer_base
-
 Set FLAGS.decode_interactive or FLAGS.decode_from_file for alternative decode
 sources.
 """
@@ -156,9 +152,9 @@ def score_file(filename):
         inputs = tab_split[0].strip()
       # Run encoders and append EOS symbol.
       targets_numpy = encoders["targets"].encode(
-          targets)
+          targets) + [text_encoder.EOS_ID]
       if has_inputs:
-        inputs_numpy = encoders["inputs"].encode(inputs)
+        inputs_numpy = encoders["inputs"].encode(inputs) + [text_encoder.EOS_ID]
       # Prepare the feed.
       if has_inputs:
         feed = {inputs_ph: inputs_numpy, targets_ph: targets_numpy}
