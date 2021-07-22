@@ -156,9 +156,9 @@ def score_file(filename):
         inputs = tab_split[0].strip()
       # Run encoders and append EOS symbol.
       targets_numpy = encoders["targets"].encode(
-          targets) + [text_encoder.EOS_ID]
+          targets)
       if has_inputs:
-        inputs_numpy = encoders["inputs"].encode(inputs) + [text_encoder.EOS_ID]
+        inputs_numpy = encoders["inputs"].encode(inputs)
       # Prepare the feed.
       if has_inputs:
         feed = {inputs_ph: inputs_numpy, targets_ph: targets_numpy}
