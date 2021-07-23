@@ -579,7 +579,7 @@ class Transformer(t2t_model.T2TModel):
           hparams.max_length, "body/targets_positional_embedding", None)
     else:
       positional_encoding = None
-    print('AAA', positional_encoding, hparams.pos)
+
     def preprocess_targets(targets, i):
       """Performs preprocessing steps on the targets to prepare for the decoder.
 
@@ -1525,19 +1525,6 @@ class Bert2Bert(Transformer):
           partial_targets_length + features.get("decode_length", decode_length))
       batch_size = partial_targets_shape[0]
 
-    if hparams.pos == "timing":
-      positional_encoding = common_attention.get_timing_signal_1d(
-          decode_length + 1, hparams.hidden_size)
-    elif hparams.pos == "timing_from_features":
-      positional_encoding = common_attention.add_timing_signals_from_features(
-          tf.zeros([1, decode_length + 1, hparams.hidden_size]), features,
-          hparams.position_features)
-    elif hparams.pos == "emb":
-      positional_encoding = common_attention.add_positional_embedding(
-          tf.zeros([1, decode_length + 1, hparams.hidden_size]),
-          hparams.max_length, "body/targets_positional_embedding", None)
-    else:
-      positional_encoding = None
     def preprocess_targets(targets, i):
       """Performs preprocessing steps on the targets to prepare for the decoder.
 
@@ -1555,34 +1542,16 @@ class Bert2Bert(Transformer):
       """
       # _shard_features called to ensure that the variable names match
       targets = self._shard_features({"targets": targets})["targets"]
-      modality_name = hparams.name.get(
-          "targets",
-          modalities.get_name(target_modality))(hparams, target_vocab_size)
-      with tf.variable_scope(modality_name):
-        bottom = hparams.bottom.get(
-            "targets", modalities.get_targets_bottom(target_modality))
-        targets = dp(bottom, targets, hparams, target_vocab_size)[0]
-      targets = common_layers.flatten4d3d(targets)
+      attention_mask = tf.to_int32(tf.not_equal(targets, 0))
 
       # GO embeddings are all zero, this is because transformer_prepare_decoder
       # Shifts the targets along by one for the input which pads with zeros.
       # If the modality already maps GO to the zero embeddings this is not
       # needed.
-      targets = tf.cond(
-          tf.equal(i, 0), lambda: tf.zeros_like(targets), lambda: targets)
+      # targets = tf.cond(
+      #     tf.equal(i, 0), lambda: tf.zeros_like(targets), lambda: targets)
 
-      if positional_encoding is not None:
-        positional_encoding_shape = positional_encoding.shape.as_list()
-        targets += tf.slice(
-            positional_encoding, [0, i, 0],
-            [positional_encoding_shape[0], 1, positional_encoding_shape[2]])
-      return targets
-
-    decoder_self_attention_bias = (
-        common_attention.attention_bias_lower_triangle(decode_length))
-    if hparams.proximity_bias:
-      decoder_self_attention_bias += common_attention.attention_bias_proximal(
-          decode_length)
+      return targets, attention_mask
 
     def symbols_to_logits_tpu_fn(ids, i, cache):
       """Go from ids to logits for next symbol on TPU.
@@ -1600,24 +1569,17 @@ class Bert2Bert(Transformer):
             attentions, used for fast decoding.
       """
       ids = ids[:, -1:]
-      targets = tf.expand_dims(tf.expand_dims(ids, axis=2), axis=3)
-      targets = preprocess_targets(targets, i)
-
-      bias_shape = decoder_self_attention_bias.shape.as_list()
-      bias = tf.slice(decoder_self_attention_bias, [0, 0, i, 0],
-                      [bias_shape[0], bias_shape[1], 1, bias_shape[3]])
+      bias = tf.to_int32(tf.not_equal(ids, 0))
+      # targets, bias = preprocess_targets(targets, i)
 
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
-            targets,
+            ids,
             cache.get("encoder_output"),
             cache.get("encoder_decoder_attention_bias"),
             bias,
-            hparams,
-            cache,
-            i,
-            nonpadding=features_to_nonpadding(features, "targets"))
+            hparams)
       modality_name = hparams.name.get(
           "targets",
           modalities.get_name(target_modality))(hparams, target_vocab_size)
@@ -1655,7 +1617,7 @@ class Bert2Bert(Transformer):
 
     ret = fast_decode_tpu(
         encoder_output=encoder_output,
-        encoder_decoder_attention_bias=encoder_decoder_attention_bias,
+        encoder_decoder_attention_bias=attention_mask,
         symbols_to_logits_fn=symbols_to_logits_tpu_fn,
         hparams=hparams,
         decode_length=decode_length,
