@@ -1281,7 +1281,7 @@ class Bert2Bert(Transformer):
                                     "model_config": self._hparams.decoder_config,
                                     "is_training": self._hparams.mode == tf.estimator.ModeKeys.TRAIN
                                 })
-    self._init_cache_fn = _init_transformer_cache
+    self._init_cache_fn = _init_bert_cache
     self._prepare_encoder_fn = transformer_prepare_encoder
     self._prepare_decoder_fn = transformer_prepare_decoder
 
@@ -1710,6 +1710,49 @@ class Bert2Bert(Transformer):
         tf.summary.scalar(key, val)
 
     return loss_num, loss_den
+
+
+def _init_bert_cache(cache, hparams, batch_size, attention_init_length,
+                            encoder_output, encoder_decoder_attention_bias,
+                            scope_prefix):
+  """Create the initial cache for Transformer fast decoding."""
+  key_channels = hparams.attention_key_channels or hparams.hidden_size
+  value_channels = hparams.attention_value_channels or hparams.hidden_size
+  num_layers = hparams.num_decoder_layers or hparams.num_hidden_layers
+  vars_3d_num_heads = (
+      hparams.num_heads if hparams.get("attention_variables_3d") else 0)
+
+  if cache is None:
+    cache = {}
+  cache.update({
+      "layer_%d" % layer: {  # pylint: disable=g-complex-comprehension
+          "k":
+              common_attention.split_heads(
+                  tf.zeros([batch_size,
+                            attention_init_length,
+                            key_channels]), hparams.num_heads),
+          "v":
+              common_attention.split_heads(
+                  tf.zeros([batch_size,
+                            attention_init_length,
+                            value_channels]), hparams.num_heads),
+      } for layer in range(num_layers)
+  })
+
+  # If `ffn_layer` is in `["dense_relu_dense" or "conv_hidden_relu"]`, then the
+  # cache key "f" won't be used, which means that the` shape of cache["f"]`
+  # won't be changed to
+  # `[beamsize*batch_size, decode_length, hparams.hidden_size]` and may cause
+  # error when applying `nest.map reshape function` on it.
+  if hparams.ffn_layer not in ["dense_relu_dense", "conv_hidden_relu"]:
+    for layer in range(num_layers):
+      cache["layer_%d" % layer]["f"] = tf.zeros(
+          [batch_size, 0, hparams.hidden_size])
+
+  if encoder_output is not None:
+    cache["encoder_output"] = encoder_output
+    cache["encoder_decoder_attention_bias"] = encoder_decoder_attention_bias
+  return cache
 
 
 def _init_transformer_cache(cache, hparams, batch_size, attention_init_length,
