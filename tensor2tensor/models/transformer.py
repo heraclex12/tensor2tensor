@@ -1569,17 +1569,24 @@ class Bert2Bert(Transformer):
             attentions, used for fast decoding.
       """
       ids = ids[:, -1:]
-      bias = tf.to_int32(tf.not_equal(ids, 0))
       # targets, bias = preprocess_targets(targets, i)
+      print(cache['decode_ids'])
+      print(ids)
+      if i == 0 :
+        cache['decode_ids'] = tf.concat([cache['decode_ids'], ids], axis=1)
+      else:
+        cache['decode_ids'] = ids
 
+      bias = tf.to_int32(tf.not_equal(cache['decode_ids'], 0))
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
-            ids,
+            cache.get("decode_ids"),
             cache.get("encoder_output"),
             cache.get("encoder_decoder_attention_bias"),
             bias,
             hparams)
+
       modality_name = hparams.name.get(
           "targets",
           modalities.get_name(target_modality))(hparams, target_vocab_size)
@@ -1606,6 +1613,7 @@ class Bert2Bert(Transformer):
 
         ret = tf.cond(
             tf.less(i, partial_targets_length), forced_logits, lambda: ret)
+      print('OK')
       return ret, cache
 
     eos_id = self._problem_hparams.vocabulary["targets"].sep_token_id
@@ -1638,7 +1646,8 @@ class Bert2Bert(Transformer):
       else:
         ret["outputs"] = ret["outputs"][:, :, partial_targets_length:]
     return ret
-  
+
+
   def _loss_single(self, logits, feature_name, feature, weights=None):
     # The current bfloat16 version still uses float32 for most parts of backward
     # propagation to keep model quality, so cast back before computing the loss
@@ -1752,6 +1761,7 @@ def _init_bert_cache(cache, hparams, batch_size, attention_init_length,
   if encoder_output is not None:
     cache["encoder_output"] = encoder_output
     cache["encoder_decoder_attention_bias"] = encoder_decoder_attention_bias
+  cache["decode_ids"] = tf.zeros([batch_size, 1], dtype='int32')
   return cache
 
 
