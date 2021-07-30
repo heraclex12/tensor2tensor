@@ -686,6 +686,7 @@ class Transformer(t2t_model.T2TModel):
 
         ret = tf.cond(
             tf.less(i, partial_targets_length), forced_logits, lambda: ret)
+
       return ret, cache
 
     eos_id = self.get_decode_end_id() or beam_search.EOS_ID
@@ -957,6 +958,7 @@ class Transformer(t2t_model.T2TModel):
 
         ret = tf.cond(
             tf.less(i, partial_targets_length), forced_logits, lambda: ret)
+
       return ret, cache
 
     sos_id = self.get_decode_start_id() or 0
@@ -1570,17 +1572,15 @@ class Bert2Bert(Transformer):
             attentions, used for fast decoding.
       """
       ids = ids[:, -1:]
-      # targets, bias = preprocess_targets(targets, i)
-      if i == tf.constant(0):
-        cache['decode_ids'] = ids
-      else:
-        cache['decode_ids'] = tf.concat([cache['decode_ids'], ids], axis=1)
-      bias = tf.to_int32(tf.not_equal(cache['decode_ids'], 0))
 
+      cache['decode_ids'] = tf.concat([ids, cache['decode_ids'][:, :-1]], axis=1)
+      decode_ids = cache['decode_ids']
+      bias = tf.to_int32(tf.not_equal(decode_ids, 0))
+      
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
-            cache.get("decode_ids"),
+            decode_ids,
             cache.get("encoder_output"),
             cache.get("encoder_decoder_attention_bias"),
             bias,
@@ -1589,7 +1589,7 @@ class Bert2Bert(Transformer):
       modality_name = hparams.name.get(
           "targets",
           modalities.get_name(target_modality))(hparams, target_vocab_size)
-      print(body_outputs[0][:, -1:, ...])
+
       with tf.variable_scope(modality_name):
         top = hparams.top.get("targets",
                               modalities.get_top(target_modality))
@@ -1761,7 +1761,7 @@ def _init_bert_cache(cache, hparams, batch_size, attention_init_length,
   if encoder_output is not None:
     cache["encoder_output"] = encoder_output
     cache["encoder_decoder_attention_bias"] = encoder_decoder_attention_bias
-  cache["decode_ids"] = tf.zeros([batch_size, 1], dtype='int32')
+  cache["decode_ids"] = tf.zeros([batch_size, attention_init_length + 1], dtype='int32')
   return cache
 
 
