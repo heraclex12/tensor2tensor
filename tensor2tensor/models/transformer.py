@@ -920,6 +920,7 @@ class Transformer(t2t_model.T2TModel):
       targets = preprocess_targets_method(targets, i)
 
       bias = decoder_self_attention_bias[:, :, i:i + 1, :i + 1]
+
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
@@ -1570,14 +1571,12 @@ class Bert2Bert(Transformer):
       """
       ids = ids[:, -1:]
       # targets, bias = preprocess_targets(targets, i)
-      print(cache['decode_ids'])
-      print(ids)
-      if i == 0 :
-        cache['decode_ids'] = tf.concat([cache['decode_ids'], ids], axis=1)
-      else:
+      if i == tf.constant(0):
         cache['decode_ids'] = ids
-
+      else:
+        cache['decode_ids'] = tf.concat([cache['decode_ids'], ids], axis=1)
       bias = tf.to_int32(tf.not_equal(cache['decode_ids'], 0))
+
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
@@ -1586,14 +1585,15 @@ class Bert2Bert(Transformer):
             cache.get("encoder_decoder_attention_bias"),
             bias,
             hparams)
-
+      
       modality_name = hparams.name.get(
           "targets",
           modalities.get_name(target_modality))(hparams, target_vocab_size)
+      print(body_outputs[0][:, -1:, ...])
       with tf.variable_scope(modality_name):
         top = hparams.top.get("targets",
                               modalities.get_top(target_modality))
-        logits = dp(top, body_outputs, None, hparams, target_vocab_size)[0]
+        logits = dp(top, [body_outputs[0][:, -1:, ...],], None, hparams, target_vocab_size)[0]
 
       ret = tf.squeeze(logits, axis=[1, 2, 3])
       if partial_targets is not None:
@@ -1613,7 +1613,7 @@ class Bert2Bert(Transformer):
 
         ret = tf.cond(
             tf.less(i, partial_targets_length), forced_logits, lambda: ret)
-      print('OK')
+
       return ret, cache
 
     eos_id = self._problem_hparams.vocabulary["targets"].sep_token_id
