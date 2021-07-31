@@ -778,10 +778,10 @@ def beam_search(symbols_to_logits_fn,
     inner_shape = tf.TensorShape([batch_size, beam_size, decode_length + 1])
   if use_tpu:
     state_struc = nest.map_structure(lambda state: state.get_shape(), states)
-    if 'decode_ids' in state_struc:
-      state_struc['decode_ids'] = inner_shape
   else:
     state_struc = nest.map_structure(get_state_shape_invariants, states)
+    if 'decode_ids' in state_struc:
+      state_struc['decode_ids'] = tf.TensorShape([None, beam_size, None])
 
   (_, alive_seq, alive_log_probs, finished_seq, finished_scores,
    finished_flags, states) = tf.while_loop(
