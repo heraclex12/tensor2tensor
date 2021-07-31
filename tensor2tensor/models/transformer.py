@@ -934,7 +934,7 @@ class Transformer(t2t_model.T2TModel):
             nonpadding=features_to_nonpadding(features, "targets"))
 
       update_decoder_attention_history(cache)
-
+      
       modality_name = hparams.name.get(
           "targets",
           modalities.get_name(target_modality))(hparams, target_vocab_size)
@@ -1572,15 +1572,18 @@ class Bert2Bert(Transformer):
             attentions, used for fast decoding.
       """
       ids = ids[:, -1:]
+      print(ids)
+      cur_shape = tf.shape(cache['decode_ids'])
 
-      cache['decode_ids'] = tf.concat([ids, cache['decode_ids'][:, :-1]], axis=1)
+      cache['decode_ids'] = tf.concat([cache['decode_ids'][:, :i], ids, cache['decode_ids'][:, i:-1]], axis=1)
+      cache['decode_ids'] = tf.reshape(cache['decode_ids'], cur_shape)
       decode_ids = cache['decode_ids']
-      bias = tf.to_int32(tf.not_equal(decode_ids, 0))
+      bias = tf.to_int32(tf.not_equal(ids, 0))
       
       with tf.variable_scope("body"):
         body_outputs = dp(
             self.decode,
-            decode_ids,
+            ids,
             cache.get("encoder_output"),
             cache.get("encoder_decoder_attention_bias"),
             bias,
@@ -1640,6 +1643,165 @@ class Bert2Bert(Transformer):
         eos_id=eos_id,
         sampling_temperature=temperature,
         top_k=top_k)
+    if partial_targets is not None:
+      if beam_size <= 1 or top_beams <= 1:
+        ret["outputs"] = ret["outputs"][:, partial_targets_length:]
+      else:
+        ret["outputs"] = ret["outputs"][:, :, partial_targets_length:]
+    return ret
+
+
+  def _fast_decode(self,
+                   features,
+                   decode_length,
+                   beam_size=1,
+                   top_beams=1,
+                   alpha=1.0,
+                   preprocess_targets_method=None):
+    """Fast decoding.
+
+    Implements both greedy and beam search decoding, uses beam search iff
+    beam_size > 1, otherwise beam search related arguments are ignored.
+
+    Args:
+      features: a map of string to model  features.
+      decode_length: an integer.  How many additional timesteps to decode.
+      beam_size: number of beams.
+      top_beams: an integer. How many of the beams to return.
+      alpha: Float that controls the length penalty. larger the alpha, stronger
+        the preference for longer translations.
+      preprocess_targets_method: method used to preprocess targets. If None,
+      uses method "preprocess_targets" defined inside this method.
+
+    Returns:
+      A dict of decoding results {
+          "outputs": integer `Tensor` of decoded ids of shape
+              [batch_size, <= decode_length] if beam_size == 1 or
+              [batch_size, top_beams, <= decode_length]
+          "scores": decoding log probs from the beam search,
+              None if using greedy decoding (beam_size=1)
+      }
+
+    Raises:
+      NotImplementedError: If there are multiple data shards.
+    """
+    if self._num_datashards != 1:
+      raise NotImplementedError("Fast decoding only supports a single shard.")
+    dp = self._data_parallelism
+    hparams = self._hparams
+    target_modality = self._problem_hparams.modality["targets"]
+    target_vocab_size = self._problem_hparams.vocab_size["targets"]
+    if target_vocab_size is not None and hasattr(hparams, "vocab_divisor"):
+      target_vocab_size += (-target_vocab_size) % hparams.vocab_divisor
+    if "targets_segmentation" in features:
+      raise NotImplementedError(
+          "Decoding not supported on packed datasets "
+          " If you want to decode from a dataset, use the non-packed version"
+          " of the dataset when decoding.")
+    if self.has_input:
+      inputs_shape = common_layers.shape_list(features["inputs"])
+      if (target_modality == modalities.ModalityType.CLASS_LABEL or
+          self._problem_hparams.get("regression_targets")):
+        decode_length = 1
+      else:
+        decode_length = (
+            inputs_shape[1] + features.get("decode_length", decode_length))
+      batch_size = inputs_shape[0]
+      if len(inputs_shape) < 4:
+        features['inputs'] = tf.expand_dims(features['inputs'], axis=-1)
+      inputs, attention_mask = self._prepare_inputs_for_bert_body(features)
+      with tf.variable_scope("body"):
+        encoder_output, encoder_decoder_attention_bias = dp(
+            self.encode,
+            inputs,
+            attention_mask)
+      encoder_output = encoder_output[0]
+      encoder_decoder_attention_bias = encoder_decoder_attention_bias[0]
+      partial_targets = features.get("partial_targets")
+    else:
+      # The problem has no inputs.
+      encoder_output = None
+      encoder_decoder_attention_bias = None
+
+      # Prepare partial targets.
+      # In either features["inputs"] or features["targets"].
+      # We force the outputs to begin with these sequences.
+      partial_targets = features.get("inputs")
+      if partial_targets is None:
+        partial_targets = features["targets"]
+      assert partial_targets is not None
+
+    def symbols_to_logits_fn(ids, i, cache):
+      """Go from ids to logits for next symbol."""
+      ids = ids[:, -1:]
+
+      if i == tf.constant(0):
+        cache['decode_ids'] = ids
+      else:
+        cache['decode_ids'] = tf.concat([cache['decode_ids'], ids], axis=1)
+      decode_ids = cache['decode_ids']
+      bias = tf.to_int32(tf.not_equal(decode_ids, 0))
+
+      with tf.variable_scope("body"):
+        body_outputs = dp(
+            self.decode,
+            decode_ids,
+            cache.get("encoder_output"),
+            cache.get("encoder_decoder_attention_bias"),
+            bias,
+            hparams)
+
+      modality_name = hparams.name.get(
+          "targets",
+          modalities.get_name(target_modality))(hparams, target_vocab_size)
+      with tf.variable_scope(modality_name):
+        top = hparams.top.get("targets", modalities.get_top(target_modality))
+        logits = dp(top, [body_outputs[0][:, -1:, ...],], None, hparams, target_vocab_size)[0]
+
+      ret = tf.squeeze(logits, axis=[1, 2, 3])
+      if partial_targets is not None:
+        # If the position is within the given partial targets, we alter the
+        # logits to always return those values.
+        # A faster approach would be to process the partial targets in one
+        # iteration in order to fill the corresponding parts of the cache.
+        # This would require broader changes, though.
+        vocab_size = tf.shape(ret)[1]
+
+        def forced_logits():
+          return tf.one_hot(
+              tf.tile(partial_targets[:, i], [beam_size]), vocab_size, 0.0,
+              -1e9)
+
+        ret = tf.cond(
+            tf.less(i, partial_targets_length), forced_logits, lambda: ret)
+
+      return ret, cache
+
+    eos_id = self._problem_hparams.vocabulary["targets"].sep_token_id
+    sos_id = self._problem_hparams.vocabulary["targets"].cls_token_id
+    temperature = features.get("sampling_temp",
+                               getattr(hparams, "sampling_temp", 0.0))
+    top_k = features.get("sampling_keep_top_k",
+                         getattr(hparams, "sampling_keep_top_k", -1))
+
+    ret = fast_decode(
+        encoder_output=encoder_output,
+        encoder_decoder_attention_bias=attention_mask,
+        symbols_to_logits_fn=symbols_to_logits_fn,
+        hparams=hparams,
+        decode_length=decode_length,
+        vocab_size=target_vocab_size,
+        init_cache_fn=self._init_cache_fn,
+        beam_size=beam_size,
+        top_beams=top_beams,
+        alpha=alpha,
+        batch_size=batch_size,
+        force_decode_length=self._decode_hparams.force_decode_length,
+        sos_id=sos_id,
+        eos_id=eos_id,
+        sampling_temperature=temperature,
+        top_k=top_k,
+        cache=None)
     if partial_targets is not None:
       if beam_size <= 1 or top_beams <= 1:
         ret["outputs"] = ret["outputs"][:, partial_targets_length:]
@@ -1761,7 +1923,7 @@ def _init_bert_cache(cache, hparams, batch_size, attention_init_length,
   if encoder_output is not None:
     cache["encoder_output"] = encoder_output
     cache["encoder_decoder_attention_bias"] = encoder_decoder_attention_bias
-  cache["decode_ids"] = tf.zeros([batch_size, attention_init_length + 1], dtype='int32')
+  cache["decode_ids"] = tf.zeros([batch_size, 1], dtype='int32')
   return cache
 
 
@@ -1825,6 +1987,7 @@ def _init_transformer_cache(cache, hparams, batch_size, attention_init_length,
 
     cache["encoder_output"] = encoder_output
     cache["encoder_decoder_attention_bias"] = encoder_decoder_attention_bias
+
   return cache
 
 
