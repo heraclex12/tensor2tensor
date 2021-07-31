@@ -39,6 +39,8 @@ from tensor2tensor.utils import mlperf_log
 from tensor2tensor.utils import registry
 import tensorflow.compat.v1 as tf
 
+from transformers import BertTokenizer
+
 FLAGS = tf.flags.FLAGS
 
 # Number of samples to draw for an image input (in such cases as captioning)
@@ -148,7 +150,10 @@ def log_decode_results(inputs,
     if identity_output:
       decoded_inputs = " ".join(map(str, inputs.flatten()))
     else:
-      decoded_inputs = inputs_vocab.decode(_save_until_eos(
+      if isinstance(inputs_vocab, BertTokenizer):
+        decoded_inputs = inputs_vocab.decode(inputs.flatten(), skip_special_tokens=True)
+      else:
+        decoded_inputs = inputs_vocab.decode(_save_until_eos(
           inputs, skip_eos_postprocess))
 
     if log_results and not is_video:
@@ -161,11 +166,16 @@ def log_decode_results(inputs,
     if targets is not None:
       decoded_targets = " ".join(map(str, targets.flatten()))
   else:
-    decoded_outputs = targets_vocab.decode(_save_until_eos(
+    if isinstance(targets_vocab, BertTokenizer):
+        decoded_outputs = targets_vocab.decode(outputs.flatten(), skip_special_tokens=True)
+        if targets is not None and log_results:
+          decoded_targets = targets_vocab.decode(targets.flatten(), skip_special_tokens=True)
+    else:
+      decoded_outputs = targets_vocab.decode(_save_until_eos(
         outputs, skip_eos_postprocess))
-    if targets is not None and log_results:
-      decoded_targets = targets_vocab.decode(_save_until_eos(
-          targets, skip_eos_postprocess))
+      if targets is not None and log_results:
+        decoded_targets = targets_vocab.decode(_save_until_eos(
+            targets, skip_eos_postprocess))
   if log_results and not is_video:
     tf.logging.info("Inference results OUTPUT: %s" % decoded_outputs)
   if targets is not None and log_results and not is_video:
@@ -683,7 +693,8 @@ def _decode_batch_input_fn(num_decode_batches, sorted_inputs, vocabulary,
       if max_input_size > 0:
         # Subtract 1 for the EOS_ID.
         input_ids = input_ids[:max_input_size - 1]
-      if has_input or task_id > -1:  # Do not append EOS for pure LM tasks.
+      if (has_input or task_id > -1) and not isinstance(vocabulary, BertTokenizer):
+        # Do not append EOS for pure LM tasks.
         final_id = text_encoder.EOS_ID if task_id < 0 else task_id
         input_ids.append(final_id)
       batch_inputs.append(input_ids)
