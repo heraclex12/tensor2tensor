@@ -3282,6 +3282,21 @@ def transformer_as_bert():
   hparams.add_hparam('ckpt_model_name', 'bert')
   return hparams
 
+@registry.register_hparams
+def transformer_as_bert_large():
+  hparams = transformer_big()
+  hparams.num_hidden_layers = 24
+  hparams.hidden_size = 1024
+  hparams.filter_size = 4096
+  hparams.num_heads = 16
+
+  hparams.add_hparam('encoder_config', '')
+  hparams.add_hparam('decoder_config', '')
+  hparams.add_hparam('encoder_scope', 'bert')
+  hparams.add_hparam('decoder_scope', 'bertclm')
+  hparams.add_hparam('ckpt_model_name', 'bert')
+  return hparams
+
 
 @registry.register_hparams
 def transformer_l2():
